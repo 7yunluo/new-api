@@ -46,6 +46,13 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 	if err != nil {
 		return nil, err
 	}
+	// A Chat Completions request without any message is not representable: the
+	// Responses input carried nothing convertible (an empty input array, or only
+	// reasoning items without text). Reject it here instead of forwarding a body
+	// that upstreams answer with an opaque "`messages` is not set" 400.
+	if len(messages) == 0 {
+		return nil, errors.New("responses input produced no chat messages")
+	}
 
 	tools, err := responsesRequestToolsToChat(req.Tools)
 	if err != nil {
