@@ -3,6 +3,8 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Responses via chat completions": "Chat Completions 経由の Responses",
+    "When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream": "有効にすると、/v1/responses リクエストは上流に送信される前に Chat Completions プロトコルに変換されます",
     "_copy": "_copy",
     "，": "、",
     ", and": "、および",

@@ -70,6 +70,7 @@ const CONFIGURATION_BLOCKS = {
     section: 'request',
     fields: [
       'allow_service_tier',
+      'responses_via_chat_completions',
       'disable_store',
       'allow_safety_identifier',
       'allow_include_obfuscation',
@@ -167,6 +168,8 @@ export function getChannelConfigurationState(
         (values.disable_store ||
           values.allow_safety_identifier ||
           values.allow_include_obfuscation)) ||
+      ((values.type === 1 || values.type === 57) &&
+        values.responses_via_chat_completions) ||
       (claudePassthrough &&
         (values.allow_speed ||
           (values.type === 14 && values.claude_beta_query)))

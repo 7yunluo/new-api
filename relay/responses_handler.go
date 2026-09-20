@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -46,7 +47,24 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		)
 	}
 
-	adaptor, requestBody, closer, apiErr := PrepareResponsesRequest(c, info, responsesReq)
+	request, adaptor, apiErr := prepareResponsesRequestContext(c, info, responsesReq)
+	if apiErr != nil {
+		return apiErr
+	}
+
+	// Custom: responses_via_chat_completions channel toggle. Channels whose
+	// upstream only speaks Chat Completions serve /v1/responses by converting the
+	// request down and the upstream response back up.
+	if info.ChannelType == constant.ChannelTypeOpenAI && info.ChannelOtherSettings.ResponsesViaChatCompletions {
+		usage, apiErr := responsesViaChatCompletions(c, info, adaptor, request)
+		if apiErr != nil {
+			return apiErr
+		}
+		ConsumeResponsesQuota(c, info, usage)
+		return nil
+	}
+
+	requestBody, closer, apiErr := buildResponsesRequestBody(c, info, adaptor, request)
 	if apiErr != nil {
 		return apiErr
 	}

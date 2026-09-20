@@ -2,9 +2,11 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +14,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/image/webp"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -440,6 +444,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		request.Messages[0].Role = "developer"
 	}
 
+	normalizeStaticWebPImages(request)
 	return request, nil
 }
 
@@ -841,4 +846,66 @@ func recordReasoningDiagnostics(c *gin.Context, info *relaycommon.RelayInfo, dia
 		diagnostics[i].From = info.RelayFormat
 	}
 	info.RecordConversionDiagnostics(c, diagnostics)
+}
+
+// normalizeStaticWebPImages converts static WebP data URIs to PNG before forwarding.
+// Some upstreams (e.g. 10.10.1.11:8081 / qwen3.5-2b-vl) silently drop static WebP
+// images, leaving the LLM with only the text prompt. Animated WebP is kept as-is.
+func normalizeStaticWebPImages(request *dto.GeneralOpenAIRequest) {
+	if request == nil {
+		return
+	}
+	for i := range request.Messages {
+		msg := &request.Messages[i]
+		contents := msg.ParseContent()
+		changed := false
+		for j := range contents {
+			if contents[j].Type != dto.ContentTypeImageURL {
+				continue
+			}
+			img := contents[j].GetImageMedia()
+			if img == nil || !strings.HasPrefix(img.Url, "data:image/webp;base64,") {
+				continue
+			}
+			data := strings.TrimPrefix(img.Url, "data:image/webp;base64,")
+			raw, err := base64.StdEncoding.DecodeString(data)
+			if err != nil {
+				continue
+			}
+			if isAnimatedWebP(raw) {
+				continue
+			}
+			decoded, err := webp.Decode(bytes.NewReader(raw))
+			if err != nil {
+				continue
+			}
+			var buf bytes.Buffer
+			if err := png.Encode(&buf, decoded); err != nil {
+				continue
+			}
+			img.Url = "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+			contents[j].ImageUrl = img
+			changed = true
+		}
+		if changed {
+			msg.SetMediaContent(contents)
+		}
+	}
+}
+
+// isAnimatedWebP reports whether a WebP RIFF container has animation chunks.
+func isAnimatedWebP(data []byte) bool {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return false
+	}
+	pos := 12
+	for pos+8 <= len(data) {
+		fourCC := string(data[pos : pos+4])
+		size := int(data[pos+4]) | int(data[pos+5])<<8 | int(data[pos+6])<<16 | int(data[pos+7])<<24
+		if fourCC == "ANIM" || fourCC == "ANMF" {
+			return true
+		}
+		pos += 8 + size + (size & 1)
+	}
+	return false
 }

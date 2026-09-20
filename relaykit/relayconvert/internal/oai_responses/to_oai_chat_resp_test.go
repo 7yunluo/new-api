@@ -135,6 +135,27 @@ func TestResponsesResponseToChatCompletionsSeparatesInterleavedOutputItems(t *te
 	assert.Equal(t, "I’ll inspect the starter repository.\n\nWhat would you like me to build?", chat.Choices[0].Message.StringContent())
 }
 
+func TestResponsesResponseToChatCompletionsReasoningOnlyDoesNotLeakIntoContent(t *testing.T) {
+	resp := &dto.OpenAIResponsesResponse{
+		ID:     "resp_1",
+		Model:  "gpt-test",
+		Status: []byte(`"completed"`),
+		Output: []dto.ResponsesOutput{
+			{
+				Type: responsesOutputTypeReasoning,
+				Content: []dto.ResponsesOutputContent{
+					{Type: "summary_text", Text: "secret reasoning"},
+				},
+			},
+		},
+	}
+
+	chat, _, err := ResponsesResponseToChatCompletionsResponse(resp, "chatcmpl_1")
+	require.NoError(t, err)
+	assert.Equal(t, "secret reasoning", chat.Choices[0].Message.GetReasoningContent())
+	assert.Equal(t, "", chat.Choices[0].Message.StringContent())
+}
+
 func TestResponsesFinishReasonFromIncompleteStatus(t *testing.T) {
 	tests := []struct {
 		name   string

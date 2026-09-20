@@ -3,6 +3,8 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Responses via chat completions": "透過 Chat Completions 轉換 Responses",
+    "When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream": "啟用後，/v1/responses 請求將轉換為 Chat Completions 協定後再發送給上游",
     "_copy": "_複製",
     "，": "，",
     ", and": "，和",

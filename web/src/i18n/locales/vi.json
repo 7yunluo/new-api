@@ -3,6 +3,8 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Responses via chat completions": "Responses qua chat completions",
+    "When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream": "Khi bật, các yêu cầu /v1/responses sẽ được chuyển đổi sang Chat Completions trước khi gửi lên upstream",
     "_copy": "_bản sao",
     "，": ", ",
     ", and": ", và",

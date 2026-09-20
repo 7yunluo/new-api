@@ -101,7 +101,8 @@ const (
 
 type ChannelOtherSettings struct {
 	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
-	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"` // "json" or "api_key"
+	ResponsesViaChatCompletions           bool                  `json:"responses_via_chat_completions,omitempty"` // 将 /v1/responses 请求转换为 Chat Completions 协议发给上游
+	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`                // "json" or "api_key"
 	OpenRouterEnterprise                  *bool                 `json:"openrouter_enterprise,omitempty"`
 	ClaudeBetaQuery                       bool                  `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
 	AllowServiceTier                      bool                  `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）

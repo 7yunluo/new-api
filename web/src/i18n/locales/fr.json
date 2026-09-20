@@ -3,6 +3,8 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Responses via chat completions": "Responses via chat completions",
+    "When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream": "Lorsqu'activé, les requêtes /v1/responses sont converties au format Chat Completions avant d'être envoyées à l'upstream",
     "_copy": "_copie",
     "，": ", ",
     ", and": ", et",

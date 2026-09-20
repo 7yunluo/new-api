@@ -231,6 +231,29 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t 
 	assert.Equal(t, "json_schema", got.ResponseFormat.Type)
 	assert.Equal(t, "answer", gjson.GetBytes(got.ResponseFormat.JsonSchema, "name").String())
 	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
+	// The inner json_schema object must not repeat the outer "type".
+	assert.False(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "type").Exists())
+}
+
+func TestResponsesRequestToChatCompletionsRequestJsonSchemaFormatShape(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, "hello"),
+		Text: mustRawMessage(t, map[string]any{
+			"format": map[string]any{
+				"type":   "json_schema",
+				"name":   "answer",
+				"strict": true,
+				"schema": map[string]any{"type": "object"},
+			},
+		}),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got.ResponseFormat)
+	assert.Equal(t, "json_schema", got.ResponseFormat.Type)
+	assert.Equal(t, "answer", gjson.GetBytes(got.ResponseFormat.JsonSchema, "name").String())
+	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
+	assert.False(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "type").Exists())
 }
 
 func TestResponsesRequestToChatCompletionsRequestEncodesCustomToolHistoryAsFunction(t *testing.T) {
@@ -271,6 +294,33 @@ func TestResponsesRequestToChatCompletionsRequestRejectsNamelessCustomToolCall(t
 		}),
 	})
 	require.ErrorContains(t, err, "custom_tool_call item is missing name")
+}
+
+func TestResponsesRequestToChatCompletionsRequestPreservesReasoningOnlyAssistantTurn(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type": "reasoning",
+				"summary": []map[string]any{
+					{"type": "summary_text", "text": "上一轮仍在分析。"},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "继续"},
+				},
+			},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 2)
+	assert.Equal(t, "assistant", got.Messages[0].Role)
+	assert.Equal(t, "上一轮仍在分析。", got.Messages[0].GetReasoningContent())
+	assert.Equal(t, "user", got.Messages[1].Role)
+	assert.Equal(t, "继续", got.Messages[1].StringContent())
 }
 
 func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {

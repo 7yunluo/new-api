@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -77,21 +78,57 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
 
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+	// Hold lifecycle events back until the first visible output arrives so a
+	// channel that fails before producing anything can still be retried.
+	var (
+		pendingEvents    []dto.ResponsesStreamResponse
+		pendingEventData []string
+		streamErr        *types.NewAPIError
+		hasVisibleOutput bool
+	)
 
-		// 检查当前数据是否包含 completed 状态和 usage 信息
+	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if streamErr != nil {
+			sr.Stop(streamErr)
+			return
+		}
+
 		var streamResponse dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
-			sr.Error(err)
+			streamErr = types.NewOpenAIError(fmt.Errorf("unmarshal responses stream event: %w", err), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+			sr.Stop(streamErr)
+			return
+		}
+		if newAPIError := responsesStreamError(streamResponse); newAPIError != nil {
+			if hasVisibleOutput {
+				sendResponsesStreamData(c, streamResponse, data)
+				types.ErrOptionWithSkipRetry()(newAPIError)
+			}
+			streamErr = newAPIError
+			sr.Stop(streamErr)
 			return
 		}
 		if streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		sendResponsesStreamData(c, streamResponse, data)
 		accumulator.Observe(&streamResponse, common.StringToByteSlice(data))
+
+		if !hasVisibleOutput && isResponsesStreamLifecycleEvent(streamResponse.Type) {
+			pendingEvents = append(pendingEvents, streamResponse)
+			pendingEventData = append(pendingEventData, data)
+			return
+		}
+		if !hasVisibleOutput {
+			for index, pendingEvent := range pendingEvents {
+				sendResponsesStreamData(c, pendingEvent, pendingEventData[index])
+			}
+			hasVisibleOutput = true
+		}
+		sendResponsesStreamData(c, streamResponse, data)
 	})
+	if streamErr != nil {
+		return nil, streamErr
+	}
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
 	info.StreamStatus.RequireTerminal()
@@ -110,4 +147,84 @@ func rewriteSGLangResponsesCreatedAt(info *relaycommon.RelayInfo, payload []byte
 		return payload
 	}
 	return patched
+}
+
+func isResponsesStreamLifecycleEvent(eventType string) bool {
+	switch eventType {
+	case "response.created", "response.in_progress", "response.queued":
+		return true
+	default:
+		return false
+	}
+}
+
+// responsesStreamError reports an in-stream upstream error that is worth
+// retrying on another channel. Only overload-class capacity errors are
+// intercepted: business errors (4xx) and terminal response.failed events are
+// forwarded to the client unchanged so upstream accounting stays intact.
+func responsesStreamError(streamResponse dto.ResponsesStreamResponse) *types.NewAPIError {
+	switch streamResponse.Type {
+	case "error", "response.error":
+	default:
+		return nil
+	}
+
+	for _, openAIError := range responsesStreamErrorFields(streamResponse) {
+		if openAIError.Message == "" || !isResponsesStreamOverloadError(openAIError) {
+			continue
+		}
+		return types.WithOpenAIError(openAIError, http.StatusInternalServerError)
+	}
+	return nil
+}
+
+// responsesStreamErrorFields lists the error envelopes an upstream may use for
+// a mid-stream failure, covering both the nested (error.error) shape and the
+// flat (top-level code/message) shape used by the Responses SSE protocol.
+func responsesStreamErrorFields(streamResponse dto.ResponsesStreamResponse) []types.OpenAIError {
+	fields := make([]types.OpenAIError, 0, 3)
+	if oaiErr := dto.GetOpenAIError(streamResponse.Error); oaiErr != nil {
+		fields = append(fields, *oaiErr)
+	}
+	if streamResponse.Response != nil {
+		if oaiErr := streamResponse.Response.GetOpenAIError(); oaiErr != nil {
+			fields = append(fields, *oaiErr)
+		}
+	}
+	if streamResponse.Message != "" || streamResponse.Code != "" {
+		var code any
+		if streamResponse.Code != "" {
+			code = streamResponse.Code
+		}
+		fields = append(fields, types.OpenAIError{
+			Message: streamResponse.Message,
+			Type:    "upstream_error",
+			Param:   streamResponse.Param,
+			Code:    code,
+		})
+	}
+	return fields
+}
+
+// responsesStreamOverloadErrors lists the upstream codes/types that mean the
+// provider is temporarily out of capacity. Anything else (invalid_request,
+// context_length_exceeded, server_error, ...) is a business error and is
+// passed through to the client untouched.
+var responsesStreamOverloadErrors = map[string]struct{}{
+	"server_is_overloaded":      {},
+	"server_overloaded":         {},
+	"overloaded":                {},
+	"overloaded_error":          {},
+	"service_unavailable":       {},
+	"service_unavailable_error": {},
+	"capacity_exceeded":         {},
+}
+
+func isResponsesStreamOverloadError(openAIError types.OpenAIError) bool {
+	for _, value := range []string{common.Interface2String(openAIError.Code), openAIError.Type} {
+		if _, exists := responsesStreamOverloadErrors[strings.ToLower(strings.TrimSpace(value))]; exists {
+			return true
+		}
+	}
+	return false
 }

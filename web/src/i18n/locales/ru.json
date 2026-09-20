@@ -3,6 +3,8 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Responses via chat completions": "Responses через chat completions",
+    "When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream": "При включении запросы /v1/responses преобразуются в Chat Completions перед отправкой на апстрим",
     "_copy": "_копировать",
     "，": ", ",
     ", and": ", и",
