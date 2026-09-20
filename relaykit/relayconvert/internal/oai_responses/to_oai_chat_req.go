@@ -546,19 +546,33 @@ func RequestTextToChatResponseFormat(raw json.RawMessage) (*dto.ResponseFormat, 
 }
 
 func responsesImagePartToChatImageURL(part map[string]any) any {
-	if imageURL, ok := part["image_url"]; ok {
+	rawImageURL, ok := part["image_url"]
+	if !ok {
+		imageURL := map[string]any{}
+		for _, key := range []string{"url", "file_id", "detail"} {
+			if value, ok := part[key]; ok {
+				imageURL[key] = value
+			}
+		}
+		if len(imageURL) == 0 {
+			return part
+		}
 		return imageURL
 	}
-	imageURL := map[string]any{}
-	for _, key := range []string{"url", "file_id", "detail"} {
-		if value, ok := part[key]; ok {
-			imageURL[key] = value
+
+	// The Responses API allows input_image.image_url to be a plain string
+	// (e.g. "data:image/png;base64,..."), while Chat Completions requires an
+	// object: {"url": "..."}. Upstreams that validate the shape (e.g. Xiaomi
+	// MiMo) reject the bare string with "`image_url` is invalid", so wrap it
+	// and carry the Responses-level detail across.
+	if url, ok := rawImageURL.(string); ok {
+		imageURL := map[string]any{"url": url}
+		if detail, ok := part["detail"]; ok {
+			imageURL["detail"] = detail
 		}
+		return imageURL
 	}
-	if len(imageURL) == 0 {
-		return part
-	}
-	return imageURL
+	return rawImageURL
 }
 
 // responsesFilePartToChat maps a Responses input_file onto Chat Completions,

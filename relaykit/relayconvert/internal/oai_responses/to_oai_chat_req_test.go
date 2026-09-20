@@ -588,6 +588,51 @@ func TestResponsesRequestToChatCompletionsRequestHoistsToolOutputMediaAfterToolB
 	})
 }
 
+func TestResponsesRequestToChatCompletionsRequestNormalizesImageURLShape(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "mimo-v2.5",
+		Input: mustRawMessage(t, []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "input_text", "text": "look"},
+				{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+			},
+		}}),
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 1)
+
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+
+	// The Responses API sends image_url as a bare string, but Chat Completions
+	// requires an object. Forwarding the string makes upstreams such as Xiaomi
+	// MiMo fail with "`image_url` is invalid".
+	imageURL := gjson.GetBytes(encoded, "messages.0.content.1.image_url")
+	assert.True(t, imageURL.IsObject(), "image_url must be a JSON object, got %s", imageURL.Raw)
+	assert.Equal(t, "data:image/png;base64,iVBORw0KGgo=", imageURL.Get("url").String())
+	assert.Equal(t, "auto", imageURL.Get("detail").String())
+}
+
+func TestResponsesRequestToChatCompletionsRequestRejectsEmptyMessages(t *testing.T) {
+	cases := map[string][]map[string]any{
+		"empty input array": {},
+		"reasoning without text": {
+			{"type": "reasoning", "id": "rs_1", "summary": []any{}},
+		},
+	}
+	for name, items := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+				Model: "gpt-test",
+				Input: mustRawMessage(t, items),
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no chat messages")
+		})
+	}
+}
+
 func mustRawMessage(t *testing.T, value any) []byte {
 	t.Helper()
 	raw, err := kitutil.Marshal(value)
