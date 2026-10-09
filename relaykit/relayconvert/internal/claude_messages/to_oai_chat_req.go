@@ -95,11 +95,7 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 		info.SetReasoningEffort(string(effectiveEffort))
 	}
 
-	if len(claudeRequest.StopSequences) == 1 {
-		openAIRequest.Stop = claudeRequest.StopSequences[0]
-	} else if len(claudeRequest.StopSequences) > 1 {
-		openAIRequest.Stop = claudeRequest.StopSequences
-	}
+	openAIRequest.Stop = claudeRequest.StopSequences
 
 	tools, _ := kitutil.Any2Type[[]dto.Tool](claudeRequest.Tools)
 	openAITools := make([]dto.ToolCallRequest, 0)

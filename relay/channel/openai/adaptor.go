@@ -444,8 +444,21 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		request.Messages[0].Role = "developer"
 	}
 
+	normalizeStopSequences(request)
 	normalizeStaticWebPImages(request)
 	return request, nil
+}
+
+// normalizeStopSequences wraps a bare string stop value in a single-element list.
+func normalizeStopSequences(request *dto.GeneralOpenAIRequest) {
+	if request == nil {
+		return
+	}
+	stop, ok := request.Stop.(string)
+	if !ok {
+		return
+	}
+	request.Stop = []string{stop}
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
