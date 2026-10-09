@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/internal/convdiag"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -631,6 +633,113 @@ func TestResponsesRequestToChatCompletionsRequestRejectsEmptyMessages(t *testing
 			assert.Contains(t, err.Error(), "no chat messages")
 		})
 	}
+}
+
+func TestResponsesRequestToChatCompletionsRequestEncryptedContentPart(t *testing.T) {
+	t.Run("string value becomes a text part", func(t *testing.T) {
+		ctx, collector := convdiag.WithCollector(context.Background())
+		got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+			Model: "gpt-test",
+			Input: mustRawMessage(t, []map[string]any{{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "look: "},
+					{"type": "encrypted_content", "encrypted_content": "secret notes"},
+				},
+			}}),
+		})
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 1)
+
+		// The whole array is text, so it collapses to a string like plain text parts.
+		assert.True(t, got.Messages[0].IsStringContent())
+		assert.Equal(t, "look: secret notes", got.Messages[0].StringContent())
+
+		diagnostics := collector.Diagnostics()
+		require.Len(t, diagnostics, 1)
+		assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+		assert.Equal(t, types.ConversionDiagnosticWarning, diagnostics[0].Severity)
+	})
+
+	t.Run("part among media keeps the array", func(t *testing.T) {
+		got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+			Model: "gpt-test",
+			Input: mustRawMessage(t, []map[string]any{{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "encrypted_content", "encrypted_content": "secret notes"},
+					{"type": "input_image", "image_url": "https://example.test/a.png"},
+				},
+			}}),
+		})
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 1)
+
+		parts := got.Messages[0].ParseContent()
+		require.Len(t, parts, 2)
+		assert.Equal(t, dto.ContentTypeText, parts[0].Type)
+		assert.Equal(t, "secret notes", parts[0].Text)
+		assert.Equal(t, dto.ContentTypeImageURL, parts[1].Type)
+	})
+
+	t.Run("non-string or empty value is dropped", func(t *testing.T) {
+		cases := map[string]any{
+			"missing field": nil,
+			"empty string":  "",
+			"object value":  map[string]any{"nested": "value"},
+		}
+		for name, value := range cases {
+			t.Run(name, func(t *testing.T) {
+				part := map[string]any{"type": "encrypted_content"}
+				if value != nil {
+					part["encrypted_content"] = value
+				}
+				ctx, collector := convdiag.WithCollector(context.Background())
+				got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+					Model: "gpt-test",
+					Input: mustRawMessage(t, []map[string]any{
+						{"role": "user", "content": []map[string]any{part}},
+						{"role": "user", "content": "next"},
+					}),
+				})
+				require.NoError(t, err)
+				require.Len(t, got.Messages, 2)
+				assert.Equal(t, "[content omitted]", got.Messages[0].StringContent())
+				assert.Equal(t, dto.Message{Role: "user", Content: "next"}, got.Messages[1])
+
+				diagnostics := collector.Diagnostics()
+				require.Len(t, diagnostics, 1)
+				assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+				assert.Equal(t, types.ConversionDiagnosticError, diagnostics[0].Severity)
+			})
+		}
+	})
+}
+
+func TestResponsesRequestToChatCompletionsRequestDropsUnknownContentPart(t *testing.T) {
+	ctx, collector := convdiag.WithCollector(context.Background())
+	got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "some_future_part", "payload": "x"},
+				{"type": "input_image", "image_url": "https://example.test/a.png"},
+			},
+		}}),
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 1)
+
+	parts := got.Messages[0].ParseContent()
+	require.Len(t, parts, 1)
+	assert.Equal(t, dto.ContentTypeImageURL, parts[0].Type)
+
+	diagnostics := collector.Diagnostics()
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+	assert.Contains(t, diagnostics[0].Message, "some_future_part")
+	assert.Equal(t, types.ConversionDiagnosticError, diagnostics[0].Severity)
 }
 
 func mustRawMessage(t *testing.T, value any) []byte {

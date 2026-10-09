@@ -311,6 +311,7 @@ func responsesContentPartsToChatContent(ctx context.Context, parts []any) (any, 
 	var textOnly strings.Builder
 	onlyText := true
 	droppedFile := false
+	droppedPart := false
 
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
@@ -361,18 +362,61 @@ func responsesContentPartsToChatContent(ctx context.Context, parts []any) (any, 
 				"type":      dto.ContentTypeVideoUrl,
 				"video_url": responsesVideoPartToChatVideoURL(part),
 			})
+		case "encrypted_content":
+			// Some clients wrap plain text in an encrypted_content part; Chat
+			// Completions rejects the type, so the value becomes a text part.
+			text, ok := part["encrypted_content"].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				convdiag.Add(ctx, types.ConversionDiagnostic{
+					Code:     "unsupported_content_type",
+					Path:     "input.content",
+					Message:  "encrypted_content part carried no string value; the part was omitted",
+					Severity: types.ConversionDiagnosticError,
+				})
+				droppedPart = true
+				continue
+			}
+			convdiag.Add(ctx, types.ConversionDiagnostic{
+				Code:     "unsupported_content_type",
+				Path:     "input.content",
+				Message:  "encrypted_content part was converted to a text part",
+				Severity: types.ConversionDiagnosticWarning,
+			})
+			textOnly.WriteString(text)
+			chatParts = append(chatParts, map[string]any{
+				"type": dto.ContentTypeText,
+				"text": text,
+			})
 		default:
-			onlyText = false
-			chatParts = append(chatParts, part)
+			// An unrecognized part would reach the upstream verbatim, which
+			// rejects it; the part is dropped instead.
+			convdiag.Add(ctx, types.ConversionDiagnostic{
+				Code:     "unsupported_content_type",
+				Path:     "input.content",
+				Message:  fmt.Sprintf("unsupported Responses content part type %q; the part was omitted", partType),
+				Severity: types.ConversionDiagnosticError,
+			})
+			droppedPart = true
 		}
 	}
 
 	if onlyText {
+		if len(chatParts) == 0 && droppedFile {
+			return "[file]", nil
+		}
+		if len(chatParts) == 0 && droppedPart {
+			return "[content omitted]", nil
+		}
 		return textOnly.String(), nil
 	}
-	if len(chatParts) == 0 && droppedFile {
+	if len(chatParts) == 0 {
 		// Chat rejects an empty content array; name what was omitted instead.
-		return "[file]", nil
+		if droppedFile {
+			return "[file]", nil
+		}
+		if droppedPart {
+			return "[content omitted]", nil
+		}
 	}
 	return chatParts, nil
 }

@@ -14,7 +14,9 @@ Custom modifications carried on this branch:
   response.failed forwarded to the client unchanged.
 - input_image.image_url wrapped as an object when converting Responses to Chat.
 - Responses->Chat conversion that yields no messages rejected locally.
+- Responses `encrypted_content` parts converted to text parts; other unknown part
+  types dropped with a diagnostic instead of being forwarded upstream.
 - Chat `stop` kept as a string array.
 
-Build: /home/yunluo7/build-rc42.sh builds new-api-custom:v1.0.0-rc.42-rvc1
+Build: /home/yunluo7/build-rc42.sh builds new-api-custom:v1.0.0-rc.42-rvc2
 from this worktree.
