@@ -1,11 +1,13 @@
 package relayconvert
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
+	claudemessages "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/claude_messages"
 	sharedgemini "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/gemini"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -39,6 +41,12 @@ func TestClaudeToolSchemaOpenAICompatibility(t *testing.T) {
 				want = tc.schema
 			}
 			assert.JSONEq(t, want, string(encoded))
+			direct, err := claudemessages.ClaudeMessagesRequestToOpenAIChat(context.Background(), request, nil)
+			require.NoError(t, err)
+			require.Len(t, direct.Tools, 1)
+			directJSON, err := kitutil.Marshal(direct.Tools[0].Function.Parameters)
+			require.NoError(t, err)
+			assert.JSONEq(t, want, string(directJSON), "direct adaptor conversion must normalize tool schemas")
 			original, err := kitutil.Marshal(schema)
 			require.NoError(t, err)
 			assert.JSONEq(t, tc.schema, string(original), "channel retries must retain the original schema")
