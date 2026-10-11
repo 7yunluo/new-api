@@ -100,12 +100,16 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 	tools, _ := kitutil.Any2Type[[]dto.Tool](claudeRequest.Tools)
 	openAITools := make([]dto.ToolCallRequest, 0)
 	for _, claudeTool := range tools {
+		parameters, err := inputSchemaToOpenAIParameters(claudeTool.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("invalid schema for tool %q: %w", claudeTool.Name, err)
+		}
 		openAITool := dto.ToolCallRequest{
 			Type: "function",
 			Function: dto.FunctionRequest{
 				Name:        claudeTool.Name,
 				Description: claudeTool.Description,
-				Parameters:  claudeTool.InputSchema,
+				Parameters:  parameters,
 			},
 		}
 		openAITools = append(openAITools, openAITool)
