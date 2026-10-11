@@ -1,6 +1,7 @@
 package relayconvert
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -12,6 +13,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClaudeToolSchemaOpenAICompatibility(t *testing.T) {
+	tests := []struct{ name, schema, want string }{
+		{"bbmodel coordinates and references",
+			`{"type":"object","properties":{"operations":{"type":"array","items":{"anyOf":[{"type":"object","properties":{"origin":{"type":"array","items":[{"type":"number"},{"type":"number"},{"type":"number"}],"minItems":3,"maxItems":3,"default":[0,0,0]},"rotation":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin"},"coordinate":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin/items/2"}}}]}}}}`,
+			`{"type":"object","properties":{"operations":{"type":"array","items":{"anyOf":[{"type":"object","properties":{"origin":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3,"default":[0,0,0]},"rotation":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin"},"coordinate":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin/items"}}}]}}}}`},
+		{"heterogeneous tuple preserved", `{"type":"array","items":[{"type":"number"},{"type":"string"}],"maxItems":2}`, ""},
+		{"unbounded tuple preserved", `{"type":"array","items":[{"type":"number"},{"type":"number"}]}`, ""},
+		{"instance data untouched", `{"type":"object","default":{"items":[{"type":"number"},{"type":"number"}],"maxItems":2,"$ref":"#/default/items/0"},"properties":{"items":{"type":"string"}}}`, ""},
+		{"escaped definition reference", `{"$defs":{"a/b~c":{"type":"array","items":[{"type":"number"},{"type":"number"}],"maxItems":2}},"properties":{"value":{"$ref":"#/$defs/a~1b~0c/items/1"}}}`, `{"$defs":{"a/b~c":{"type":"array","items":{"type":"number"},"maxItems":2}},"properties":{"value":{"$ref":"#/$defs/a~1b~0c/items"}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			require.NoError(t, kitutil.Unmarshal([]byte(tc.schema), &schema))
+			request := dto.ClaudeRequest{Model: "deepseek-v4.1-flash", Tools: []dto.Tool{{Name: "mcp__bbmodel__bbmodel_edit", InputSchema: schema}}}
+			converted, err := ClaudeMessagesRequestToOpenAIChat(request, nil)
+			require.NoError(t, err)
+			require.Len(t, converted.Tools, 1)
+			encoded, err := kitutil.Marshal(converted.Tools[0].Function.Parameters)
+			require.NoError(t, err)
+			want := tc.want
+			if want == "" {
+				want = tc.schema
+			}
+			assert.JSONEq(t, want, string(encoded))
+			original, err := kitutil.Marshal(schema)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.schema, string(original), "channel retries must retain the original schema")
+		})
+	}
+	t.Run("excessive nesting rejected", func(t *testing.T) {
+		var schema map[string]any
+		require.NoError(t, kitutil.Unmarshal([]byte(strings.Repeat(`{"items":`, 130)+`{"type":"number"}`+strings.Repeat(`}`, 130)), &schema))
+		_, err := ClaudeMessagesRequestToOpenAIChat(dto.ClaudeRequest{Tools: []dto.Tool{{Name: "deep_tool", InputSchema: schema}}}, nil)
+		require.ErrorContains(t, err, "maximum nesting depth")
+	})
+}
 
 func TestRequestConverterRegistryListsSupportedTextConverters(t *testing.T) {
 	tests := []struct {
