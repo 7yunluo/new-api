@@ -149,7 +149,22 @@ func claudeMessagesToResponsesInput(messages []dto.ClaudeMessage) (json.RawMessa
 			return nil, fmt.Errorf("messages[%d].content: %w", messageIndex, err)
 		}
 		contentParts := make([]map[string]any, 0, len(blocks))
+		var reasoningContent strings.Builder
+		flushReasoning := func() {
+			if reasoningContent.Len() == 0 {
+				return
+			}
+			input = append(input, map[string]any{
+				"type": "reasoning",
+				"summary": []map[string]any{{
+					"type": "summary_text",
+					"text": reasoningContent.String(),
+				}},
+			})
+			reasoningContent.Reset()
+		}
 		flushContent := func() {
+			flushReasoning()
 			if len(contentParts) == 0 {
 				return
 			}
@@ -163,6 +178,14 @@ func claudeMessagesToResponsesInput(messages []dto.ClaudeMessage) (json.RawMessa
 		for blockIndex := range blocks {
 			block := blocks[blockIndex]
 			switch block.Type {
+			case "thinking":
+				if role == "assistant" && block.Thinking != nil {
+					reasoningContent.WriteString(*block.Thinking)
+				}
+			case "redacted_thinking":
+				if role == "assistant" {
+					reasoningContent.WriteString("[redacted thinking]")
+				}
 			case "text", "input_text":
 				partType := "input_text"
 				if role == "assistant" {

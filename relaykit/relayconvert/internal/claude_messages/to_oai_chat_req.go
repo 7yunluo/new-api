@@ -186,6 +186,8 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 					if mediaMsg.Thinking != nil {
 						reasoningContent.WriteString(*mediaMsg.Thinking)
 					}
+				case "redacted_thinking":
+					reasoningContent.WriteString("[redacted thinking]")
 				case "text", "input_text":
 					message := dto.MediaContent{
 						Type:         "text",
