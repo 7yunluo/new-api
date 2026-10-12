@@ -199,3 +199,23 @@ func TestClaudeMessagesRequestToOpenAIChatKeepsThinkingWithToolCalls(t *testing.
 	assert.Equal(t, "need to run", *assistant.ReasoningContent)
 	require.Len(t, assistant.ParseToolCalls(), 1)
 }
+
+func TestClaudeMessagesRequestToOpenAIChatKeepsRedactedThinkingPlaceholder(t *testing.T) {
+	got, err := ClaudeMessagesRequestToOpenAIChat(context.Background(), dto.ClaudeRequest{
+		Model:     "claude-test",
+		MaxTokens: lo.ToPtr(uint(64)),
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "redacted_thinking", Data: "encrypted-blob"},
+				{Type: "text", Text: lo.ToPtr("hello")},
+			}},
+		},
+	}, &convmeta.Values{})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 2)
+	assistant := got.Messages[1]
+	require.NotNil(t, assistant.ReasoningContent)
+	assert.Equal(t, "[redacted thinking]", *assistant.ReasoningContent)
+}
