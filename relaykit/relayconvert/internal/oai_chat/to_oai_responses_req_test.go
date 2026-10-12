@@ -3,6 +3,7 @@ package oaichat
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -175,4 +176,70 @@ func assistantMessageWithTool(content string, id string, name string, args strin
 		},
 	})
 	return msg
+}
+
+func TestChatCompletionsRequestToResponsesRequestPreservesAssistantReasoningHistory(t *testing.T) {
+	reasoning := "先分析问题。"
+	req := &dto.GeneralOpenAIRequest{
+		Model: "gpt-test",
+		Messages: []dto.Message{
+			{Role: "user", Content: "1+1=?"},
+			{Role: "assistant", Content: "答案是 2", ReasoningContent: &reasoning},
+		},
+	}
+
+	got, err := ChatCompletionsRequestToResponsesRequest(context.Background(), req)
+	require.NoError(t, err)
+
+	rawInput := string(got.Input)
+	require.True(t, strings.Contains(rawInput, `"type":"reasoning"`), "expected a reasoning input item, got: %s", rawInput)
+	require.True(t, strings.Contains(rawInput, `"type":"summary_text"`), "expected summary_text part, got: %s", rawInput)
+	require.True(t, strings.Contains(rawInput, "先分析问题。"), "expected reasoning text in history, got: %s", rawInput)
+
+	var inputItems []map[string]any
+	require.NoError(t, json.Unmarshal(got.Input, &inputItems))
+	reasoningIndex := -1
+	assistantIndex := -1
+	for i, item := range inputItems {
+		switch {
+		case item["type"] == "reasoning":
+			reasoningIndex = i
+		case item["role"] == "assistant":
+			assistantIndex = i
+		}
+	}
+	if reasoningIndex == -1 || assistantIndex == -1 {
+		t.Fatalf("missing reasoning or assistant message item: %s", rawInput)
+	}
+	require.Less(t, reasoningIndex, assistantIndex, "reasoning item must precede the assistant message within the same turn")
+}
+
+func TestChatCompletionsRequestToResponsesRequestReasoningBeforeAssistantText(t *testing.T) {
+	reasoning := "思考过程"
+	req := &dto.GeneralOpenAIRequest{
+		Model: "gpt-test",
+		Messages: []dto.Message{
+			{Role: "user", Content: "解释一下"},
+			{Role: "assistant", Content: "这是一个解释", ReasoningContent: &reasoning},
+		},
+	}
+
+	got, err := ChatCompletionsRequestToResponsesRequest(context.Background(), req)
+	require.NoError(t, err)
+
+	var inputItems []map[string]any
+	require.NoError(t, json.Unmarshal(got.Input, &inputItems))
+	reasoningIndex := -1
+	assistantIndex := -1
+	for i, item := range inputItems {
+		switch {
+		case item["type"] == "reasoning":
+			reasoningIndex = i
+		case item["role"] == "assistant":
+			assistantIndex = i
+		}
+	}
+	require.NotEqual(t, -1, reasoningIndex)
+	require.NotEqual(t, -1, assistantIndex)
+	require.Less(t, reasoningIndex, assistantIndex)
 }

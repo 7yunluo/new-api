@@ -304,6 +304,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
+  'responses_via_chat_completions',
   'disable_store',
   'allow_safety_identifier',
   'allow_include_obfuscation',
@@ -2994,6 +2995,34 @@ export function ChannelMutateDrawer({
                 )}
               />
             </>
+          )}
+
+          {(currentType === 1 || currentType === 57) && (
+            <FormField
+              control={form.control}
+              name='responses_via_chat_completions'
+              render={({ field }) => (
+                <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                  <div className='space-y-0.5'>
+                    <FormLabel className='text-sm'>
+                      {t('Responses via chat completions')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'When enabled, /v1/responses requests are converted to Chat Completions before being sent to the upstream'
+                      )}
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      disabled={sensitiveLocked}
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
           )}
 
           {CLAUDE_FIELD_PASSTHROUGH_TYPES.has(currentType) && (

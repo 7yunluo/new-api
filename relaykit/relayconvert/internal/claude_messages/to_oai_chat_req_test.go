@@ -149,3 +149,73 @@ func TestClaudeMessagesRequestToOpenAIChatKeepsParallelToolResultsContiguous(t *
 	require.NotNil(t, parts[0].GetImageMedia())
 	assert.Equal(t, dataURL, parts[0].GetImageMedia().Url)
 }
+
+func TestClaudeMessagesRequestToOpenAIChatKeepsThinkingAsReasoningContent(t *testing.T) {
+	got, err := ClaudeMessagesRequestToOpenAIChat(context.Background(), dto.ClaudeRequest{
+		Model:     "claude-test",
+		MaxTokens: lo.ToPtr(uint(64)),
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "thinking", Thinking: lo.ToPtr("first thought ")},
+				{Type: "thinking", Thinking: lo.ToPtr("second thought")},
+				{Type: "text", Text: lo.ToPtr("hello")},
+			}},
+			{Role: "user", Content: "again"},
+		},
+	}, &convmeta.Values{})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 3)
+	assistant := got.Messages[1]
+	assert.Equal(t, "assistant", assistant.Role)
+	require.NotNil(t, assistant.ReasoningContent)
+	assert.Equal(t, "first thought second thought", *assistant.ReasoningContent)
+	parts := assistant.ParseContent()
+	require.Len(t, parts, 1)
+	assert.Equal(t, "hello", parts[0].Text)
+}
+
+func TestClaudeMessagesRequestToOpenAIChatKeepsThinkingWithToolCalls(t *testing.T) {
+	got, err := ClaudeMessagesRequestToOpenAIChat(context.Background(), dto.ClaudeRequest{
+		Model:     "claude-test",
+		MaxTokens: lo.ToPtr(uint(64)),
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "thinking", Thinking: lo.ToPtr("need to run")},
+				{Type: "tool_use", Id: "toolu_1", Name: "bash", Input: map[string]any{"cmd": "ls"}},
+			}},
+			{Role: "user", Content: []dto.ClaudeMediaMessage{
+				{Type: "tool_result", ToolUseId: "toolu_1", Content: "ok"},
+			}},
+		},
+	}, &convmeta.Values{})
+	require.NoError(t, err)
+
+	assistant := got.Messages[1]
+	assert.Equal(t, "assistant", assistant.Role)
+	require.NotNil(t, assistant.ReasoningContent)
+	assert.Equal(t, "need to run", *assistant.ReasoningContent)
+	require.Len(t, assistant.ParseToolCalls(), 1)
+}
+
+func TestClaudeMessagesRequestToOpenAIChatKeepsRedactedThinkingPlaceholder(t *testing.T) {
+	got, err := ClaudeMessagesRequestToOpenAIChat(context.Background(), dto.ClaudeRequest{
+		Model:     "claude-test",
+		MaxTokens: lo.ToPtr(uint(64)),
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "redacted_thinking", Data: "encrypted-blob"},
+				{Type: "text", Text: lo.ToPtr("hello")},
+			}},
+		},
+	}, &convmeta.Values{})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 2)
+	assistant := got.Messages[1]
+	require.NotNil(t, assistant.ReasoningContent)
+	assert.Equal(t, "[redacted thinking]", *assistant.ReasoningContent)
+}

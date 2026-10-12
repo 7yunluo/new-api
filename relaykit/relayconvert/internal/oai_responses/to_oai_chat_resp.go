@@ -260,7 +260,12 @@ func ExtractOutputTextFromResponses(resp *dto.OpenAIResponsesResponse) string {
 	if sb.Len() > 0 {
 		return sb.String()
 	}
+	// Fallback must not pick reasoning-only outputs into the visible content;
+	// otherwise a reasoning-only turn would leak its reasoning into content.
 	for _, out := range resp.Output {
+		if out.Type != "message" {
+			continue
+		}
 		var outputText strings.Builder
 		for _, c := range out.Content {
 			if c.Text != "" {

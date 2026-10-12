@@ -280,6 +280,7 @@ export const channelFormSchema = z
     azure_responses_version: z.string().optional(), // Azure specific
     // Field passthrough controls (stored in settings JSON)
     allow_service_tier: z.boolean().optional(), // OpenAI/Anthropic
+    responses_via_chat_completions: z.boolean().optional(), // OpenAI: convert /v1/responses to chat completions
     disable_store: z.boolean().optional(), // OpenAI only
     allow_safety_identifier: z.boolean().optional(), // OpenAI only
     allow_include_obfuscation: z.boolean().optional(), // OpenAI: include usage obfuscation
@@ -471,6 +472,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   azure_responses_version: '',
   // Field passthrough controls
   allow_service_tier: false,
+  responses_via_chat_completions: false,
   disable_store: false,
   allow_safety_identifier: false,
   allow_include_obfuscation: false,
@@ -543,6 +545,7 @@ export function transformChannelToFormDefaults(
   let isEnterpriseAccount = false
   let awsKeyType: 'ak_sk' | 'api_key' = 'ak_sk'
   let allowServiceTier = false
+  let responsesViaChatCompletions = false
   let disableStore = false
   let allowSafetyIdentifier = false
   let allowIncludeObfuscation = false
@@ -564,6 +567,8 @@ export function transformChannelToFormDefaults(
       isEnterpriseAccount = parsed.openrouter_enterprise === true
       awsKeyType = parsed.aws_key_type || 'ak_sk'
       allowServiceTier = parsed.allow_service_tier === true
+      responsesViaChatCompletions =
+        parsed.responses_via_chat_completions === true
       disableStore = parsed.disable_store === true
       allowSafetyIdentifier = parsed.allow_safety_identifier === true
       allowIncludeObfuscation = parsed.allow_include_obfuscation === true
@@ -624,6 +629,7 @@ export function transformChannelToFormDefaults(
     azure_responses_version: azureResponsesVersion,
     aws_key_type: awsKeyType,
     allow_service_tier: allowServiceTier,
+    responses_via_chat_completions: responsesViaChatCompletions,
     disable_store: disableStore,
     allow_include_obfuscation: allowIncludeObfuscation,
     allow_inference_geo: allowInferenceGeo,
@@ -752,6 +758,14 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     if ('allow_include_obfuscation' in settingsObj) {
       delete settingsObj.allow_include_obfuscation
     }
+  }
+
+  // Only the OpenAI-type adaptor can serve /v1/responses from a Chat Completions upstream.
+  if (formData.type === 1 || formData.type === 57) {
+    settingsObj.responses_via_chat_completions =
+      formData.responses_via_chat_completions === true
+  } else if ('responses_via_chat_completions' in settingsObj) {
+    delete settingsObj.responses_via_chat_completions
   }
 
   if (

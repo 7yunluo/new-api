@@ -95,21 +95,21 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 		info.SetReasoningEffort(string(effectiveEffort))
 	}
 
-	if len(claudeRequest.StopSequences) == 1 {
-		openAIRequest.Stop = claudeRequest.StopSequences[0]
-	} else if len(claudeRequest.StopSequences) > 1 {
-		openAIRequest.Stop = claudeRequest.StopSequences
-	}
+	openAIRequest.Stop = claudeRequest.StopSequences
 
 	tools, _ := kitutil.Any2Type[[]dto.Tool](claudeRequest.Tools)
 	openAITools := make([]dto.ToolCallRequest, 0)
 	for _, claudeTool := range tools {
+		parameters, err := inputSchemaToOpenAIParameters(claudeTool.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("invalid schema for tool %q: %w", claudeTool.Name, err)
+		}
 		openAITool := dto.ToolCallRequest{
 			Type: "function",
 			Function: dto.FunctionRequest{
 				Name:        claudeTool.Name,
 				Description: claudeTool.Description,
-				Parameters:  claudeTool.InputSchema,
+				Parameters:  parameters,
 			},
 		}
 		openAITools = append(openAITools, openAITool)
@@ -174,6 +174,7 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 				return nil, err
 			}
 			var toolCalls []dto.ToolCallRequest
+			var reasoningContent strings.Builder
 			mediaMessages := make([]dto.MediaContent, 0, len(content))
 
 			for blockIndex, mediaMsg := range content {
@@ -181,6 +182,12 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 					toolNames[mediaMsg.Id] = mediaMsg.Name
 				}
 				switch mediaMsg.Type {
+				case "thinking":
+					if mediaMsg.Thinking != nil {
+						reasoningContent.WriteString(*mediaMsg.Thinking)
+					}
+				case "redacted_thinking":
+					reasoningContent.WriteString("[redacted thinking]")
 				case "text", "input_text":
 					message := dto.MediaContent{
 						Type:         "text",
@@ -267,6 +274,10 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 				}
 			}
 
+			if reasoningContent.Len() > 0 {
+				reasoning := reasoningContent.String()
+				openAIMessage.ReasoningContent = &reasoning
+			}
 			if len(toolCalls) > 0 {
 				openAIMessage.SetToolCalls(toolCalls)
 			}

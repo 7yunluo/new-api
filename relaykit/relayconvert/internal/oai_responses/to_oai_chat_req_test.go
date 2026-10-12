@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/internal/convdiag"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,6 +233,29 @@ func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t 
 	assert.Equal(t, "json_schema", got.ResponseFormat.Type)
 	assert.Equal(t, "answer", gjson.GetBytes(got.ResponseFormat.JsonSchema, "name").String())
 	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
+	// The inner json_schema object must not repeat the outer "type".
+	assert.False(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "type").Exists())
+}
+
+func TestResponsesRequestToChatCompletionsRequestJsonSchemaFormatShape(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, "hello"),
+		Text: mustRawMessage(t, map[string]any{
+			"format": map[string]any{
+				"type":   "json_schema",
+				"name":   "answer",
+				"strict": true,
+				"schema": map[string]any{"type": "object"},
+			},
+		}),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got.ResponseFormat)
+	assert.Equal(t, "json_schema", got.ResponseFormat.Type)
+	assert.Equal(t, "answer", gjson.GetBytes(got.ResponseFormat.JsonSchema, "name").String())
+	assert.True(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "strict").Bool())
+	assert.False(t, gjson.GetBytes(got.ResponseFormat.JsonSchema, "type").Exists())
 }
 
 func TestResponsesRequestToChatCompletionsRequestEncodesCustomToolHistoryAsFunction(t *testing.T) {
@@ -271,6 +296,33 @@ func TestResponsesRequestToChatCompletionsRequestRejectsNamelessCustomToolCall(t
 		}),
 	})
 	require.ErrorContains(t, err, "custom_tool_call item is missing name")
+}
+
+func TestResponsesRequestToChatCompletionsRequestPreservesReasoningOnlyAssistantTurn(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type": "reasoning",
+				"summary": []map[string]any{
+					{"type": "summary_text", "text": "上一轮仍在分析。"},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "继续"},
+				},
+			},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 2)
+	assert.Equal(t, "assistant", got.Messages[0].Role)
+	assert.Equal(t, "上一轮仍在分析。", got.Messages[0].GetReasoningContent())
+	assert.Equal(t, "user", got.Messages[1].Role)
+	assert.Equal(t, "继续", got.Messages[1].StringContent())
 }
 
 func TestResponsesRequestToChatCompletionsRequestRejectsStatefulFields(t *testing.T) {
@@ -536,6 +588,158 @@ func TestResponsesRequestToChatCompletionsRequestHoistsToolOutputMediaAfterToolB
 		require.NotNil(t, parts[0].GetImageMedia())
 		assert.Equal(t, dataURL, parts[0].GetImageMedia().Url)
 	})
+}
+
+func TestResponsesRequestToChatCompletionsRequestNormalizesImageURLShape(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+		Model: "mimo-v2.5",
+		Input: mustRawMessage(t, []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "input_text", "text": "look"},
+				{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+			},
+		}}),
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 1)
+
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+
+	// The Responses API sends image_url as a bare string, but Chat Completions
+	// requires an object. Forwarding the string makes upstreams such as Xiaomi
+	// MiMo fail with "`image_url` is invalid".
+	imageURL := gjson.GetBytes(encoded, "messages.0.content.1.image_url")
+	assert.True(t, imageURL.IsObject(), "image_url must be a JSON object, got %s", imageURL.Raw)
+	assert.Equal(t, "data:image/png;base64,iVBORw0KGgo=", imageURL.Get("url").String())
+	assert.Equal(t, "auto", imageURL.Get("detail").String())
+}
+
+func TestResponsesRequestToChatCompletionsRequestRejectsEmptyMessages(t *testing.T) {
+	cases := map[string][]map[string]any{
+		"empty input array": {},
+		"reasoning without text": {
+			{"type": "reasoning", "id": "rs_1", "summary": []any{}},
+		},
+	}
+	for name, items := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+				Model: "gpt-test",
+				Input: mustRawMessage(t, items),
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no chat messages")
+		})
+	}
+}
+
+func TestResponsesRequestToChatCompletionsRequestEncryptedContentPart(t *testing.T) {
+	t.Run("string value becomes a text part", func(t *testing.T) {
+		ctx, collector := convdiag.WithCollector(context.Background())
+		got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+			Model: "gpt-test",
+			Input: mustRawMessage(t, []map[string]any{{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "look: "},
+					{"type": "encrypted_content", "encrypted_content": "secret notes"},
+				},
+			}}),
+		})
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 1)
+
+		// The whole array is text, so it collapses to a string like plain text parts.
+		assert.True(t, got.Messages[0].IsStringContent())
+		assert.Equal(t, "look: secret notes", got.Messages[0].StringContent())
+
+		diagnostics := collector.Diagnostics()
+		require.Len(t, diagnostics, 1)
+		assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+		assert.Equal(t, types.ConversionDiagnosticWarning, diagnostics[0].Severity)
+	})
+
+	t.Run("part among media keeps the array", func(t *testing.T) {
+		got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
+			Model: "gpt-test",
+			Input: mustRawMessage(t, []map[string]any{{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "encrypted_content", "encrypted_content": "secret notes"},
+					{"type": "input_image", "image_url": "https://example.test/a.png"},
+				},
+			}}),
+		})
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 1)
+
+		parts := got.Messages[0].ParseContent()
+		require.Len(t, parts, 2)
+		assert.Equal(t, dto.ContentTypeText, parts[0].Type)
+		assert.Equal(t, "secret notes", parts[0].Text)
+		assert.Equal(t, dto.ContentTypeImageURL, parts[1].Type)
+	})
+
+	t.Run("non-string or empty value is dropped", func(t *testing.T) {
+		cases := map[string]any{
+			"missing field": nil,
+			"empty string":  "",
+			"object value":  map[string]any{"nested": "value"},
+		}
+		for name, value := range cases {
+			t.Run(name, func(t *testing.T) {
+				part := map[string]any{"type": "encrypted_content"}
+				if value != nil {
+					part["encrypted_content"] = value
+				}
+				ctx, collector := convdiag.WithCollector(context.Background())
+				got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+					Model: "gpt-test",
+					Input: mustRawMessage(t, []map[string]any{
+						{"role": "user", "content": []map[string]any{part}},
+						{"role": "user", "content": "next"},
+					}),
+				})
+				require.NoError(t, err)
+				require.Len(t, got.Messages, 2)
+				assert.Equal(t, "[content omitted]", got.Messages[0].StringContent())
+				assert.Equal(t, dto.Message{Role: "user", Content: "next"}, got.Messages[1])
+
+				diagnostics := collector.Diagnostics()
+				require.Len(t, diagnostics, 1)
+				assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+				assert.Equal(t, types.ConversionDiagnosticError, diagnostics[0].Severity)
+			})
+		}
+	})
+}
+
+func TestResponsesRequestToChatCompletionsRequestDropsUnknownContentPart(t *testing.T) {
+	ctx, collector := convdiag.WithCollector(context.Background())
+	got, err := ResponsesRequestToChatCompletionsRequest(ctx, &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "some_future_part", "payload": "x"},
+				{"type": "input_image", "image_url": "https://example.test/a.png"},
+			},
+		}}),
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 1)
+
+	parts := got.Messages[0].ParseContent()
+	require.Len(t, parts, 1)
+	assert.Equal(t, dto.ContentTypeImageURL, parts[0].Type)
+
+	diagnostics := collector.Diagnostics()
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "unsupported_content_type", diagnostics[0].Code)
+	assert.Contains(t, diagnostics[0].Message, "some_future_part")
+	assert.Equal(t, types.ConversionDiagnosticError, diagnostics[0].Severity)
 }
 
 func mustRawMessage(t *testing.T, value any) []byte {

@@ -65,6 +65,13 @@ func attachOpenAIChatRequest(request any, set Set, options *convmeta.Options) (a
 				continue
 			}
 			parameters, schemaDiagnostics := jsonSchemaParameters(index, definition.Function)
+			if set.Source == types.RelayFormatClaude {
+				var err error
+				parameters, err = inputSchemaToOpenAIParameters(parameters)
+				if err != nil {
+					return nil, diagnostics, fmt.Errorf("invalid schema for tool %q: %w", definition.Function.Name, err)
+				}
+			}
 			diagnostics = append(diagnostics, schemaDiagnostics...)
 			target.Tools = append(target.Tools, dto.ToolCallRequest{
 				Type: "function",

@@ -38,6 +38,23 @@ func normalizeChatImageURLToString(v any) any {
 	}
 }
 
+func appendChatReasoningInputItem(inputItems *[]map[string]any, msg dto.Message) {
+	if msg.Role != "assistant" {
+		return
+	}
+	reasoning := msg.GetReasoningContent()
+	if reasoning == "" {
+		return
+	}
+	*inputItems = append(*inputItems, map[string]any{
+		"type": "reasoning",
+		"summary": []map[string]any{{
+			"type": "summary_text",
+			"text": reasoning,
+		}},
+	})
+}
+
 func convertChatResponseFormatToResponsesText(reqFormat *dto.ResponseFormat) json.RawMessage {
 	if reqFormat == nil || strings.TrimSpace(reqFormat.Type) == "" {
 		return nil
@@ -158,6 +175,7 @@ func ChatCompletionsRequestToResponsesRequest(ctx context.Context, req *dto.Gene
 		item := map[string]any{
 			"role": role,
 		}
+		appendChatReasoningInputItem(&inputItems, msg)
 
 		if msg.Content == nil {
 			item["content"] = ""

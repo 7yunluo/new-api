@@ -46,6 +46,13 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 	if err != nil {
 		return nil, err
 	}
+	// A Chat Completions request without any message is not representable: the
+	// Responses input carried nothing convertible (an empty input array, or only
+	// reasoning items without text). Reject it here instead of forwarding a body
+	// that upstreams answer with an opaque "`messages` is not set" 400.
+	if len(messages) == 0 {
+		return nil, errors.New("responses input produced no chat messages")
+	}
 
 	tools, err := responsesRequestToolsToChat(req.Tools)
 	if err != nil {
@@ -220,6 +227,16 @@ func responsesInputItemToChatMessages(ctx context.Context, item map[string]any, 
 		callID := strings.TrimSpace(kitutil.Interface2String(item["call_id"]))
 		content, media := responsesToolOutputToChat(ctx, item["output"])
 		return append(messages, dto.Message{Role: "tool", ToolCallId: callID, Content: content}), media, nil
+	case "reasoning":
+		reasoning := responsesReasoningItemToChatText(item)
+		if reasoning == "" {
+			return messages, nil, nil
+		}
+		return append(messages, dto.Message{
+			Role:             "assistant",
+			Content:          "",
+			ReasoningContent: &reasoning,
+		}), nil, nil
 	}
 
 	role := strings.TrimSpace(kitutil.Interface2String(item["role"]))
@@ -231,6 +248,41 @@ func responsesInputItemToChatMessages(ctx context.Context, item map[string]any, 
 		return nil, nil, err
 	}
 	return append(messages, dto.Message{Role: role, Content: content}), nil, nil
+}
+
+func responsesReasoningItemToChatText(item map[string]any) string {
+	textParts := make([]string, 0, 2)
+	for _, raw := range []any{item["summary"], item["content"]} {
+		if raw == nil {
+			continue
+		}
+		var parts []any
+		switch value := raw.(type) {
+		case []any:
+			parts = value
+		case []map[string]any:
+			parts = make([]any, 0, len(value))
+			for _, part := range value {
+				parts = append(parts, part)
+			}
+		default:
+			continue
+		}
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			partType := strings.ToLower(strings.TrimSpace(kitutil.Interface2String(part["type"])))
+			if partType != "summary_text" && partType != "reasoning_text" {
+				continue
+			}
+			if text := strings.TrimSpace(kitutil.Interface2String(part["text"])); text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+	}
+	return strings.Join(textParts, "\n")
 }
 
 func responsesInputContentToChatContent(ctx context.Context, content any) (any, error) {
@@ -259,6 +311,7 @@ func responsesContentPartsToChatContent(ctx context.Context, parts []any) (any, 
 	var textOnly strings.Builder
 	onlyText := true
 	droppedFile := false
+	droppedPart := false
 
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
@@ -309,18 +362,61 @@ func responsesContentPartsToChatContent(ctx context.Context, parts []any) (any, 
 				"type":      dto.ContentTypeVideoUrl,
 				"video_url": responsesVideoPartToChatVideoURL(part),
 			})
+		case "encrypted_content":
+			// Some clients wrap plain text in an encrypted_content part; Chat
+			// Completions rejects the type, so the value becomes a text part.
+			text, ok := part["encrypted_content"].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				convdiag.Add(ctx, types.ConversionDiagnostic{
+					Code:     "unsupported_content_type",
+					Path:     "input.content",
+					Message:  "encrypted_content part carried no string value; the part was omitted",
+					Severity: types.ConversionDiagnosticError,
+				})
+				droppedPart = true
+				continue
+			}
+			convdiag.Add(ctx, types.ConversionDiagnostic{
+				Code:     "unsupported_content_type",
+				Path:     "input.content",
+				Message:  "encrypted_content part was converted to a text part",
+				Severity: types.ConversionDiagnosticWarning,
+			})
+			textOnly.WriteString(text)
+			chatParts = append(chatParts, map[string]any{
+				"type": dto.ContentTypeText,
+				"text": text,
+			})
 		default:
-			onlyText = false
-			chatParts = append(chatParts, part)
+			// An unrecognized part would reach the upstream verbatim, which
+			// rejects it; the part is dropped instead.
+			convdiag.Add(ctx, types.ConversionDiagnostic{
+				Code:     "unsupported_content_type",
+				Path:     "input.content",
+				Message:  fmt.Sprintf("unsupported Responses content part type %q; the part was omitted", partType),
+				Severity: types.ConversionDiagnosticError,
+			})
+			droppedPart = true
 		}
 	}
 
 	if onlyText {
+		if len(chatParts) == 0 && droppedFile {
+			return "[file]", nil
+		}
+		if len(chatParts) == 0 && droppedPart {
+			return "[content omitted]", nil
+		}
 		return textOnly.String(), nil
 	}
-	if len(chatParts) == 0 && droppedFile {
+	if len(chatParts) == 0 {
 		// Chat rejects an empty content array; name what was omitted instead.
-		return "[file]", nil
+		if droppedFile {
+			return "[file]", nil
+		}
+		if droppedPart {
+			return "[content omitted]", nil
+		}
 	}
 	return chatParts, nil
 }
@@ -390,13 +486,21 @@ func responsesRequestToolsToChat(raw json.RawMessage) ([]dto.ToolCallRequest, er
 	out := make([]dto.ToolCallRequest, 0, len(tools))
 	for _, tool := range tools {
 		toolType := strings.TrimSpace(kitutil.Interface2String(tool["type"]))
-		if toolType == "function" {
+		name := strings.TrimSpace(kitutil.Interface2String(tool["name"]))
+		// 基元律动等上游只支持 OpenAI function tools，不认 OpenRouter server tools。
+		// 这里把带 name 的 server_tool / web_search 等工具降级成 function tool，
+		// 并把 input_schema 映射为 Chat Completions 的 parameters。
+		if toolType == "function" || name != "" {
+			parameters := tool["parameters"]
+			if parameters == nil {
+				parameters = tool["input_schema"]
+			}
 			out = append(out, dto.ToolCallRequest{
 				Type: "function",
 				Function: dto.FunctionRequest{
-					Name:        strings.TrimSpace(kitutil.Interface2String(tool["name"])),
+					Name:        name,
 					Description: kitutil.Interface2String(tool["description"]),
-					Parameters:  tool["parameters"],
+					Parameters:  parameters,
 				},
 			})
 			continue
@@ -469,7 +573,17 @@ func responsesRequestTextToChatResponseFormat(raw json.RawMessage) (*dto.Respons
 
 	out := &dto.ResponseFormat{Type: formatType}
 	if formatType == "json_schema" {
-		schemaRaw, err := kitutil.Marshal(format)
+		// Chat Completions expects response_format.json_schema to contain the
+		// schema-specific fields (name/schema/strict), not a nested copy of the
+		// outer "type". Strip the Responses-level "type" from the inner object.
+		inner := make(map[string]any, len(format)-1)
+		for key, value := range format {
+			if key == "type" {
+				continue
+			}
+			inner[key] = value
+		}
+		schemaRaw, err := kitutil.Marshal(inner)
 		if err != nil {
 			return nil, err
 		}
@@ -483,19 +597,33 @@ func RequestTextToChatResponseFormat(raw json.RawMessage) (*dto.ResponseFormat, 
 }
 
 func responsesImagePartToChatImageURL(part map[string]any) any {
-	if imageURL, ok := part["image_url"]; ok {
+	rawImageURL, ok := part["image_url"]
+	if !ok {
+		imageURL := map[string]any{}
+		for _, key := range []string{"url", "file_id", "detail"} {
+			if value, ok := part[key]; ok {
+				imageURL[key] = value
+			}
+		}
+		if len(imageURL) == 0 {
+			return part
+		}
 		return imageURL
 	}
-	imageURL := map[string]any{}
-	for _, key := range []string{"url", "file_id", "detail"} {
-		if value, ok := part[key]; ok {
-			imageURL[key] = value
+
+	// The Responses API allows input_image.image_url to be a plain string
+	// (e.g. "data:image/png;base64,..."), while Chat Completions requires an
+	// object: {"url": "..."}. Upstreams that validate the shape (e.g. Xiaomi
+	// MiMo) reject the bare string with "`image_url` is invalid", so wrap it
+	// and carry the Responses-level detail across.
+	if url, ok := rawImageURL.(string); ok {
+		imageURL := map[string]any{"url": url}
+		if detail, ok := part["detail"]; ok {
+			imageURL["detail"] = detail
 		}
+		return imageURL
 	}
-	if len(imageURL) == 0 {
-		return part
-	}
-	return imageURL
+	return rawImageURL
 }
 
 // responsesFilePartToChat maps a Responses input_file onto Chat Completions,

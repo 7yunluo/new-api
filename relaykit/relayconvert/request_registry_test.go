@@ -1,10 +1,13 @@
 package relayconvert
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
+	claudemessages "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/claude_messages"
 	sharedgemini "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/gemini"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -12,6 +15,69 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClaudeToolSchemaOpenAICompatibility(t *testing.T) {
+	tests := []struct{ name, schema, want string }{
+		{"bbmodel coordinates and references",
+			`{"type":"object","properties":{"operations":{"type":"array","items":{"anyOf":[{"type":"object","properties":{"origin":{"type":"array","items":[{"type":"number"},{"type":"number"},{"type":"number"}],"minItems":3,"maxItems":3,"default":[0,0,0]},"rotation":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin"},"coordinate":{"$ref":"#/properties/operations/items/anyOf/0/properties/origin/items/2"}}}]}}}}`,
+			`{"type":"object","properties":{"operations":{"type":"array","items":{"anyOf":[{"type":"object","properties":{"origin":{"type":"array","prefixItems":[{"type":"number"},{"type":"number"},{"type":"number"}],"minItems":3,"maxItems":3,"default":[0,0,0]},"rotation":{"type":"array","prefixItems":[{"type":"number"},{"type":"number"},{"type":"number"}],"minItems":3,"maxItems":3,"default":[0,0,0]},"coordinate":{"type":"number"}}}]}}}}`},
+		{"heterogeneous tuple uses prefixItems", `{"type":"array","items":[{"type":"number"},{"type":"string"}],"maxItems":2}`, `{"type":"array","prefixItems":[{"type":"number"},{"type":"string"}],"maxItems":2}`},
+		{"open tail uses empty schema", `{"type":"array","items":[{"type":"number"}],"maxItems":2}`, `{"type":"array","prefixItems":[{"type":"number"}],"items":{},"maxItems":2}`},
+		{"additionalItems becomes items", `{"type":"array","items":[{"type":"number"}],"additionalItems":{"type":"string"},"maxItems":2}`, `{"type":"array","prefixItems":[{"type":"number"}],"items":{"type":"string"},"maxItems":2}`},
+		{"unbounded tuple uses open tail", `{"type":"array","items":[{"type":"number"},{"type":"number"}]}`, `{"type":"array","prefixItems":[{"type":"number"},{"type":"number"}],"items":{}}`},
+		{"additionalItems false tightens tail", `{"type":"array","items":[{"type":"number"}],"additionalItems":false,"maxItems":2}`, `{"type":"array","prefixItems":[{"type":"number"}],"items":{},"maxItems":1}`},
+		{"additionalItems true opens tail", `{"type":"array","items":[{"type":"number"}],"additionalItems":true,"maxItems":2}`, `{"type":"array","prefixItems":[{"type":"number"}],"items":{},"maxItems":2}`},
+		{"additionalItems reference follows move", `{"type":"array","items":[{"type":"number"}],"additionalItems":{"type":"string"},"maxItems":2,"properties":{"tail":{"$ref":"#/additionalItems"}}}`, `{"type":"array","prefixItems":[{"type":"number"}],"items":{"type":"string"},"maxItems":2,"properties":{"tail":{"type":"string"}}}`},
+		{"root union wrapped as object", `{"anyOf":[{"type":"object","properties":{"op":{"const":"x","type":"string"}},"required":["op"]},{"type":"object","properties":{"id":{"type":"number"}},"required":["id"]}]}`, `{"type":"object","properties":{"value":{"anyOf":[{"type":"object","properties":{"op":{"const":"x","type":"string"}},"required":["op"]},{"type":"object","properties":{"id":{"type":"number"}},"required":["id"]}]}},"required":["value"],"additionalProperties":false}`},
+		{"root oneOf wrapped as object", `{"oneOf":[{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}]}`, `{"type":"object","properties":{"value":{"oneOf":[{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}]}},"required":["value"],"additionalProperties":false}`},
+		{"root allOf wrapped as object", `{"allOf":[{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}]}`, `{"type":"object","properties":{"value":{"allOf":[{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}]}},"required":["value"],"additionalProperties":false}`},
+		{"instance data untouched", `{"type":"object","default":{"items":[{"type":"number"},{"type":"number"}],"maxItems":2,"$ref":"#/default/items/0"},"properties":{"items":{"type":"string"}}}`, ""},
+		{"escaped definition reference", `{"$defs":{"a/b~c":{"type":"array","items":[{"type":"number"},{"type":"number"}],"maxItems":2}},"properties":{"value":{"$ref":"#/$defs/a~1b~0c/items/1"}}}`, `{"$defs":{"a/b~c":{"type":"array","prefixItems":[{"type":"number"},{"type":"number"}],"maxItems":2}},"properties":{"value":{"type":"number"}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			require.NoError(t, kitutil.Unmarshal([]byte(tc.schema), &schema))
+			request := dto.ClaudeRequest{Model: "deepseek-v4.1-flash", Tools: []dto.Tool{{Name: "mcp__bbmodel__bbmodel_edit", InputSchema: schema}}}
+			converted, err := ClaudeMessagesRequestToOpenAIChat(request, nil)
+			require.NoError(t, err)
+			require.Len(t, converted.Tools, 1)
+			encoded, err := kitutil.Marshal(converted.Tools[0].Function.Parameters)
+			require.NoError(t, err)
+			want := tc.want
+			if want == "" {
+				want = tc.schema
+			}
+			assert.JSONEq(t, want, string(encoded))
+			direct, err := claudemessages.ClaudeMessagesRequestToOpenAIChat(context.Background(), request, nil)
+			require.NoError(t, err)
+			require.Len(t, direct.Tools, 1)
+			directJSON, err := kitutil.Marshal(direct.Tools[0].Function.Parameters)
+			require.NoError(t, err)
+			assert.JSONEq(t, want, string(directJSON), "direct adaptor conversion must normalize tool schemas")
+			original, err := kitutil.Marshal(schema)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.schema, string(original), "channel retries must retain the original schema")
+		})
+	}
+	t.Run("excessive tuple positions rejected", func(t *testing.T) {
+		items := make([]any, 1001)
+		for i := range items {
+			items[i] = map[string]any{"type": "number"}
+		}
+		schema := map[string]any{"type": "object", "properties": map[string]any{
+			"x": map[string]any{"type": "array", "items": items, "maxItems": float64(len(items))},
+		}}
+		_, err := ClaudeMessagesRequestToOpenAIChat(dto.ClaudeRequest{Tools: []dto.Tool{{Name: "wide_tool", InputSchema: schema}}}, nil)
+		require.ErrorContains(t, err, "maximum tuple positions")
+	})
+	t.Run("excessive nesting rejected", func(t *testing.T) {
+		var schema map[string]any
+		require.NoError(t, kitutil.Unmarshal([]byte(strings.Repeat(`{"items":`, 130)+`{"type":"number"}`+strings.Repeat(`}`, 130)), &schema))
+		_, err := ClaudeMessagesRequestToOpenAIChat(dto.ClaudeRequest{Tools: []dto.Tool{{Name: "deep_tool", InputSchema: schema}}}, nil)
+		require.ErrorContains(t, err, "maximum nesting depth")
+	})
+}
 
 func TestRequestConverterRegistryListsSupportedTextConverters(t *testing.T) {
 	tests := []struct {
