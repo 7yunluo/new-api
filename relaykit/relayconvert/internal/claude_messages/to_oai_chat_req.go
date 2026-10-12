@@ -174,6 +174,7 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 				return nil, err
 			}
 			var toolCalls []dto.ToolCallRequest
+			var reasoningContent strings.Builder
 			mediaMessages := make([]dto.MediaContent, 0, len(content))
 
 			for blockIndex, mediaMsg := range content {
@@ -181,6 +182,10 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 					toolNames[mediaMsg.Id] = mediaMsg.Name
 				}
 				switch mediaMsg.Type {
+				case "thinking":
+					if mediaMsg.Thinking != nil {
+						reasoningContent.WriteString(*mediaMsg.Thinking)
+					}
 				case "text", "input_text":
 					message := dto.MediaContent{
 						Type:         "text",
@@ -267,6 +272,10 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 				}
 			}
 
+			if reasoningContent.Len() > 0 {
+				reasoning := reasoningContent.String()
+				openAIMessage.ReasoningContent = &reasoning
+			}
 			if len(toolCalls) > 0 {
 				openAIMessage.SetToolCalls(toolCalls)
 			}
